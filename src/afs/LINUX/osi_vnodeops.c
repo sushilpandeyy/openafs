@@ -2410,10 +2410,16 @@ afs_linux_read_cache(struct file *cachefp, struct page *page,
     struct address_space *cachemapping;
     int pageindex;
     int code = 0;
+    unsigned int folio_order = 0; 
 
     cachemapping = cacheinode->i_mapping;
     newpage = NULL;
     cachepage = NULL;
+
+    if (afs_detect_dynamic_folio_support() && page->private > 0) {
+        folio_order = (unsigned int)page->private;
+        page->private = 0; // Clear the hint
+    }
 
     /* If we're trying to read a page that's past the end of the disk
      * cache file, then just return a zeroed page */
@@ -2433,7 +2439,11 @@ afs_linux_read_cache(struct file *cachefp, struct page *page,
 	cachepage = find_get_page(cachemapping, pageindex);
 	if (!cachepage) {
 	    if (newpage == NULL) {
-		newpage = afs_page_cache_alloc(cachemapping);
+		if (folio_order > 0) {
+		    newpage = afs_folio_cache_alloc(cachemapping, folio_order);
+		} else {
+		    newpage = afs_page_cache_alloc(cachemapping);
+		}
 	    }
 	    if (newpage == NULL) {
 		code = -ENOMEM;
