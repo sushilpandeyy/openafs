@@ -3016,12 +3016,13 @@ afs_linux_can_bypass(struct inode *ip) {
 	case ALWAYS_BYPASS_CACHE:
 	    return 1;
 	case LARGE_FILES_BYPASS_CACHE:
-	    if (i_size_read(ip) > cache_bypass_threshold)
+    if (i_size_read(ip) > cache_bypass_threshold) {
         if (afs_detect_dynamic_folio_support()) {
-                return 0; 
-            }
-		return 1;
-	    AFS_FALLTHROUGH;
+            return 0; // Use cache with large folios
+        }
+        return 1;
+    }
+    AFS_FALLTHROUGH;
 	default:
 	    return 0;
      }
