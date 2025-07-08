@@ -2356,12 +2356,22 @@ afs_page_cache_alloc(struct address_space *cachemapping)
 
 static int afs_dynamic_folio_support = -1;
 
+static int enable_dynamic_multifolio = 1;
+module_param(enable_dynamic_multifolio, int, 0644);
+MODULE_PARM_DESC(enable_dynamic_multifolio, 
+                "Enable dynamic multi-folio support (0=disable, 1=enable)");
+
 static int
 afs_detect_dynamic_folio_support(void)
 {
     if (afs_dynamic_folio_support >= 0)
         return afs_dynamic_folio_support;
-        
+    
+    if (!enable_dynamic_multifolio) {
+        afs_dynamic_folio_support = 0;
+        return 0;
+    }
+
     // Check both kernel support and system capabilities
     if (afs_detect_large_folio_support() && 
         (cache_bypass_strategy != ALWAYS_BYPASS_CACHE)) {
