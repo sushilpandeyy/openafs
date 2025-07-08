@@ -2747,7 +2747,7 @@ afs_linux_bypass_readahead(struct readahead_control *rac)
 	}
 
 	isize = (i_size_read(fp->f_mapping->host) - 1) >> PAGE_SHIFT;
-	if (pp->index > isize) {
+	if (afs_page_index(pp) > isize) {
 	    if (afs_PageLocked(pp)) {
 		afs_unlock_page(pp);
 	    }
@@ -2758,10 +2758,10 @@ afs_linux_bypass_readahead(struct readahead_control *rac)
 	if (page_ix == 0) {
 	    offset = page_offset(pp);
 	    ancr->offset = ancr->auio->uio_offset = offset;
-	    base_index = pp->index;
+	    base_index = afs_page_index(pp);
 	}
 	iovecp[page_ix].iov_len = PAGE_SIZE;
-	if (base_index != pp->index) {
+	if (base_index != afs_page_index(pp)) {
 	    if (afs_PageLocked(pp)) {
 		 afs_unlock_page(pp);
 	    }
@@ -2836,7 +2836,7 @@ afs_linux_bypass_readpages(struct file *fp, struct address_space *mapping,
 	 * the page cache gets upset. */
 	list_del(&pp->lru);
 	isize = (i_size_read(fp->f_mapping->host) - 1) >> PAGE_SHIFT;
-	if (pp->index > isize) {
+	if (afs_page_index(pp) > isize) {
 	    if (PageLocked(pp)) {
 		unlock_page(pp);
 	    }
@@ -2847,11 +2847,11 @@ afs_linux_bypass_readpages(struct file *fp, struct address_space *mapping,
 	if (page_ix == 0) {
 	    offset = page_offset(pp);
 	    ancr->offset = ancr->auio->uio_offset = offset;
-	    base_index = pp->index;
+	    base_index = afs_page_index(pp);
 	}
 	iovecp[page_ix].iov_len = PAGE_SIZE;
-	code = add_to_page_cache(pp, mapping, pp->index, GFP_KERNEL);
-	if (base_index != pp->index) {
+	code = add_to_page_cache(pp, mapping, afs_page_index(pp), GFP_KERNEL);
+	if (base_index != afs_page_index(pp)) {
 	    if (PageLocked(pp)) {
 		 unlock_page(pp);
 	    }
@@ -3239,7 +3239,7 @@ afs_linux_readpages(struct file *fp, struct address_space *mapping,
 	    goto out;
 	}
 
-	if (tdc && !afs_add_to_page_cache_lru(&lrupages, page, mapping, page->index,
+	if (tdc && !afs_add_to_page_cache_lru(&lrupages, page, mapping, afs_page_index(page),
 					      GFP_KERNEL)) {
 	    /* Note that afs_add_to_page_cache_lru() locks the 'page'.
 	     * afs_linux_read_cache() is guaranteed to handle unlocking it. */
