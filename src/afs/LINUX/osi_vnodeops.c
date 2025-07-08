@@ -2381,6 +2381,24 @@ afs_detect_dynamic_folio_support(void)
     return afs_dynamic_folio_support;
 }
 
+static unsigned int
+afs_calculate_optimal_folio_order(struct inode *inode, loff_t offset, size_t len)
+{
+    if (!afs_detect_dynamic_folio_support())
+        return 0;
+        
+    // For chunk-aligned requests, use full chunk size
+    if ((offset & (AFS_CHUNKSIZE - 1)) == 0 && len >= AFS_CHUNKSIZE) {
+        return ilog2(AFS_CHUNKSIZE / PAGE_SIZE);
+    }
+    
+    // For smaller requests, use appropriate order
+    if (len >= (PAGE_SIZE * 4)) {
+        return 2; // 4 pages
+    }
+    
+    return 0;
+}
 
 /* Populate a page by filling it from the cache file pointed at by cachefp
  * (which contains indicated chunk)
