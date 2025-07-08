@@ -3007,6 +3007,9 @@ afs_linux_can_bypass(struct inode *ip) {
 	    return 1;
 	case LARGE_FILES_BYPASS_CACHE:
 	    if (i_size_read(ip) > cache_bypass_threshold)
+        if (afs_detect_dynamic_folio_support()) {
+                return 0; 
+            }
 		return 1;
 	    AFS_FALLTHROUGH;
 	default:
