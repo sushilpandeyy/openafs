@@ -2362,6 +2362,26 @@ afs_page_cache_alloc(struct address_space *cachemapping)
 #endif
 }
 
+static int afs_dynamic_folio_support = -1;
+
+static int
+afs_detect_dynamic_folio_support(void)
+{
+    if (afs_dynamic_folio_support >= 0)
+        return afs_dynamic_folio_support;
+        
+    // Check both kernel support and system capabilities
+    if (afs_detect_large_folio_support() && 
+        (cache_bypass_strategy != ALWAYS_BYPASS_CACHE)) {
+        afs_dynamic_folio_support = 1;
+    } else {
+        afs_dynamic_folio_support = 0;
+    }
+    
+    return afs_dynamic_folio_support;
+}
+
+
 /* Populate a page by filling it from the cache file pointed at by cachefp
  * (which contains indicated chunk)
  * If task is NULL, the page copy occurs syncronously, and the routine
