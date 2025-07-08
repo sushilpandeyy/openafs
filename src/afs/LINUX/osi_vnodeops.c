@@ -3149,6 +3149,7 @@ afs_linux_readahead(struct readahead_control *rac)
     loff_t offset;
     struct afs_lru_pages lrupages;
     struct afs_pagecopy_task *task;
+    int use_dynamic_folios = afs_detect_dynamic_folio_support();
 
     if (afs_linux_bypass_check(inode)) {
 	afs_linux_bypass_readahead(rac);
@@ -3179,6 +3180,14 @@ afs_linux_readahead(struct readahead_control *rac)
 
     while ((page = readahead_page(rac)) != NULL) {
 	offset = page_offset(page);
+
+    if (use_dynamic_folios) {
+	    unsigned int optimal_order = afs_calculate_optimal_folio_order(inode, offset, 
+									   readahead_length(rac));
+	    if (optimal_order > 0) {
+		page->private = optimal_order;
+	    }
+	}
 
 	code = get_dcache_readahead(&tdc, &cacheFp, avc, offset);
 	if (code != 0) {
@@ -3234,6 +3243,7 @@ afs_linux_readpages(struct file *fp, struct address_space *mapping,
     loff_t offset;
     struct afs_lru_pages lrupages;
     struct afs_pagecopy_task *task;
+    int use_dynamic_folios = afs_detect_dynamic_folio_support();
 
     if (afs_linux_bypass_check(inode))
 	return afs_linux_bypass_readpages(fp, mapping, page_list, num_pages);
@@ -3264,6 +3274,14 @@ afs_linux_readpages(struct file *fp, struct address_space *mapping,
 	struct page *page = list_entry(page_list->prev, struct page, lru);
 	list_del(&page->lru);
 	offset = page_offset(page);
+
+    if (use_dynamic_folios) {
+	    unsigned int optimal_order = afs_calculate_optimal_folio_order(inode, offset, 
+									   num_pages * PAGE_SIZE);
+	    if (optimal_order > 0) {
+		page->private = optimal_order;
+	    }
+	}
 
 	code = get_dcache_readahead(&tdc, &cacheFp, avc, offset);
 	if (code != 0) {
