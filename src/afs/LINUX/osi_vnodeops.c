@@ -2391,12 +2391,10 @@ afs_detect_dynamic_folio_support(void)
     return afs_dynamic_folio_support;
 }
 
+#if 1 /* will be replaced with a #if defined(use multipage folio support) */
 static unsigned int
 afs_calculate_optimal_folio_order(struct inode *inode, loff_t offset, size_t len)
 {
-    if (!afs_detect_dynamic_folio_support())
-        return 0;
-        
     // For chunk-aligned requests, use full chunk size
     if ((offset & (AFS_CHUNKSIZE - 1)) == 0 && len >= AFS_CHUNKSIZE) {
         return ilog2(AFS_CHUNKSIZE / PAGE_SIZE);
@@ -2409,6 +2407,7 @@ afs_calculate_optimal_folio_order(struct inode *inode, loff_t offset, size_t len
     
     return 0;
 }
+#endif 
 
 /* Populate a page by filling it from the cache file pointed at by cachefp
  * (which contains indicated chunk)
@@ -3205,13 +3204,12 @@ afs_linux_readahead(struct readahead_control *rac)
     while ((page = readahead_page(rac)) != NULL) {
 	offset = page_offset(page);
 
-    if (use_dynamic_folios) {
-	    unsigned int optimal_order = afs_calculate_optimal_folio_order(inode, offset, 
-									   readahead_length(rac));
-	    if (optimal_order > 0) {
-		page->private = optimal_order;
-	    }
-	}
+    #if 1 /* again will be replaced with check for a defined name */
+    unsigned int optimal_order = afs_calculate_optimal_folio_order(inode, offset, readahead_length(rac));
+    if (optimal_order > 0) {
+    page->private = optimal_order;
+    }
+    #endif
 
 	code = get_dcache_readahead(&tdc, &cacheFp, avc, offset);
 	if (code != 0) {
@@ -3299,13 +3297,13 @@ afs_linux_readpages(struct file *fp, struct address_space *mapping,
 	list_del(&page->lru);
 	offset = page_offset(page);
 
-    if (use_dynamic_folios) {
-	    unsigned int optimal_order = afs_calculate_optimal_folio_order(inode, offset, 
-									   num_pages * PAGE_SIZE);
-	    if (optimal_order > 0) {
-		page->private = optimal_order;
-	    }
-	}
+    #if 1 /* again will be replaced with check for a defined name */
+    unsigned int optimal_order = afs_calculate_optimal_folio_order(inode, offset, 
+                                                               num_pages * PAGE_SIZE);
+    if (optimal_order > 0) {
+        page->private = optimal_order;
+    }
+    #endif
 
 	code = get_dcache_readahead(&tdc, &cacheFp, avc, offset);
 	if (code != 0) {
