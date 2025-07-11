@@ -852,6 +852,43 @@ afs_put_page(struct page *p)
 #endif
 }
 
+static inline int
+afs_PageLocked(struct page *page)
+{
+#if defined(HAVE_LINUX_READAHEAD_FOLIO)
+    return folio_test_locked(page_folio(page));
+#else
+    return PageLocked(page);
+#endif
+}
+static inline void
+afs_unlock_page(struct page *page)
+{
+#if defined(HAVE_LINUX_READAHEAD_FOLIO)
+    folio_unlock(page_folio(page));
+#else
+    unlock_page(page);
+#endif
+}
+
+#if defined(STRUCT_ADDRESS_SPACE_OPERATIONS_HAS_READAHEAD)
+static inline struct page *
+afs_readahead_page(struct readahead_control *rac)
+{
+# if defined(HAVE_LINUX_READAHEAD_FOLIO)
+    struct folio *folio;
+
+    folio = __readahead_folio(rac);
+    if (folio == NULL) {
+	return NULL;
+    }
+    return folio_page(folio, 0);
+# else
+    return readahead_page(rac);
+# endif
+}
+#endif
+
 static inline struct dentry *
 afs_lookup_noperm(char *name, struct dentry *dp)
 {

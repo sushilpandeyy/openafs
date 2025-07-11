@@ -2741,15 +2741,17 @@ afs_linux_bypass_readahead(struct readahead_control *rac)
     iovecp = ancr->auio->uio_iov;
 
     for (page_ix = 0; page_ix < num_pages; ++page_ix) {
-	pp = readahead_page(rac);
-	if (pp == NULL)
+	pp = afs_readahead_page(rac);
+	if (pp == NULL) {
 	    break;
+	}
 
 	isize = (i_size_read(fp->f_mapping->host) - 1) >> PAGE_SHIFT;
 	if (pp->index > isize) {
-	    if (PageLocked(pp))
-		unlock_page(pp);
-	    put_page(pp);
+	    if (afs_PageLocked(pp)) {
+		afs_unlock_page(pp);
+	    }
+	    afs_put_page(pp);
 	    continue;
 	}
 
@@ -2760,9 +2762,10 @@ afs_linux_bypass_readahead(struct readahead_control *rac)
 	}
 	iovecp[page_ix].iov_len = PAGE_SIZE;
 	if (base_index != pp->index) {
-	    if (PageLocked(pp))
-		 unlock_page(pp);
-	    put_page(pp);
+	    if (afs_PageLocked(pp)) {
+		 afs_unlock_page(pp);
+	    }
+	    afs_put_page(pp);
 	    iovecp[page_ix].iov_base = NULL;
 	    base_index++;
 	    ancr->length -= PAGE_SIZE;
@@ -2824,67 +2827,71 @@ afs_linux_bypass_readpages(struct file *fp, struct address_space *mapping,
 
     for(page_ix = 0; page_ix < num_pages; ++page_ix) {
 
-	if(list_empty(page_list))
+	if (list_empty(page_list)) {
 	    break;
+	}
 
 	pp = list_entry(page_list->prev, struct page, lru);
 	/* If we allocate a page and don't remove it from page_list,
 	 * the page cache gets upset. */
 	list_del(&pp->lru);
 	isize = (i_size_read(fp->f_mapping->host) - 1) >> PAGE_SHIFT;
-	if(pp->index > isize) {
-	    if(PageLocked(pp))
+	if (pp->index > isize) {
+	    if (PageLocked(pp)) {
 		unlock_page(pp);
+	    }
 	    put_page(pp);
 	    continue;
 	}
 
-	if(page_ix == 0) {
+	if (page_ix == 0) {
 	    offset = page_offset(pp);
 	    ancr->offset = ancr->auio->uio_offset = offset;
 	    base_index = pp->index;
 	}
-        iovecp[page_ix].iov_len = PAGE_SIZE;
-        code = add_to_page_cache(pp, mapping, pp->index, GFP_KERNEL);
-        if(base_index != pp->index) {
-            if(PageLocked(pp))
+	iovecp[page_ix].iov_len = PAGE_SIZE;
+	code = add_to_page_cache(pp, mapping, pp->index, GFP_KERNEL);
+	if (base_index != pp->index) {
+	    if (PageLocked(pp)) {
 		 unlock_page(pp);
-            put_page(pp);
+	    }
+	    put_page(pp);
 	    iovecp[page_ix].iov_base = (void *) 0;
 	    base_index++;
 	    ancr->length -= PAGE_SIZE;
 	    continue;
-        }
-        base_index++;
-        if(code) {
-	    if(PageLocked(pp))
+	}
+	base_index++;
+	if (code) {
+	    if (PageLocked(pp)) {
 		unlock_page(pp);
+	    }
 	    put_page(pp);
 	    iovecp[page_ix].iov_base = (void *) 0;
 	} else {
 	    page_count++;
-	    if(!PageLocked(pp)) {
+	    if (!PageLocked(pp)) {
 		lock_page(pp);
 	    }
 
 	    /* save the page for background map */
-            iovecp[page_ix].iov_base = (void*) pp;
+	    iovecp[page_ix].iov_base = (void*) pp;
 
 	    /* and put it on the LRU cache */
 	    afs_lru_cache_add(&lrupages, pp);
-        }
+	}
     }
 
     /* If there were useful pages in the page list, make sure all pages
      * are in the LRU cache, then schedule the read */
-    if(page_count) {
+    if (page_count) {
 	afs_lru_cache_finalize(&lrupages);
 	credp = crref();
 	/* background thread frees the ancr */
-        code = afs_ReadNoCache(avc, ancr, credp);
+	code = afs_ReadNoCache(avc, ancr, credp);
 	crfree(credp);
     } else {
-        /* If there is nothing for the background thread to handle,
+	/* If there is nothing for the background thread to handle,
          * it won't be freeing the things that we never gave it */
 	afs_free_ncr(&ancr);
     }
@@ -3138,25 +3145,25 @@ afs_linux_readahead(struct readahead_control *rac)
 
     afs_lru_cache_init(&lrupages);
 
-    while ((page = readahead_page(rac)) != NULL) {
+    while ((page = afs_readahead_page(rac)) != NULL) {
 	offset = page_offset(page);
 
 	code = get_dcache_readahead(&tdc, &cacheFp, avc, offset);
 	if (code != 0) {
-	    if (PageLocked(page)) {
-		unlock_page(page);
+	    if (afs_PageLocked(page)) {
+		afs_unlock_page(page);
 	    }
-	    put_page(page);
+	    afs_put_page(page);
 	    goto done;
 	}
 
 	if (tdc != NULL) {
 	    /* afs_linux_read_cache will unlock the page */
 	    afs_linux_read_cache(cacheFp, page, tdc->f.chunk, &lrupages, task);
-	} else if (PageLocked(page)) {
-	    unlock_page(page);
+	} else if (afs_PageLocked(page)) {
+	    afs_unlock_page(page);
 	}
-	put_page(page);
+	afs_put_page(page);
     }
 
  done:
