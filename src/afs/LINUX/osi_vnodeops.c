@@ -48,10 +48,11 @@
 #define MAX_ERRNO 1000L
 #endif
 
+/* This is incorrect.. AFS_CHUNKSIZE is a macro defined in afs_chunkops.h
 #ifndef AFS_CHUNKSIZE
 #define AFS_CHUNKSIZE (64 * 1024) 
 #endif
-
+*/
 #if LINUX_VERSION_CODE < KERNEL_VERSION(2,6,34)
 /* Enable our workaround for a race with d_splice_alias. The race was fixed in
  * 2.6.34, so don't do it after that point. */
@@ -2347,6 +2348,7 @@ mapping_read_page(struct address_space *mapping, struct page *page)
 #endif
 }
 
+#if !defined(LINUX_MULTIPAGE_FOLIO)
 /*
  * small compat wrapper for filemap_alloc_folio/page_cache_alloc
  */
@@ -2364,9 +2366,15 @@ afs_page_cache_alloc(struct address_space *cachemapping)
     return page_cache_alloc(cachemapping);
 #endif
 }
+#endif /* LINUX_MULTIPAGE_FOLIO */
 
+/* Don't do this..
+
+Deciding to use/not use multipage folios is a compile time configuration
+plus this would not be in the correct location anyway
+*/
+#if 0
 static int afs_dynamic_folio_support = -1;
-
 static int enable_dynamic_multifolio = 1;
 module_param(enable_dynamic_multifolio, int, 0644);
 MODULE_PARM_DESC(enable_dynamic_multifolio, 
@@ -2383,7 +2391,7 @@ afs_detect_dynamic_folio_support(void)
         return 0;
     }
 
-    // Check system capabilities
+    // Check system capabilities    /* Don't use C++ style comments */
     if (cache_bypass_strategy != ALWAYS_BYPASS_CACHE) {
         afs_dynamic_folio_support = 1;
     } else {
@@ -2392,11 +2400,17 @@ afs_detect_dynamic_folio_support(void)
     
     return afs_dynamic_folio_support;
 }
+#endif
 
-#if 1 /* will be replaced with a #if defined(use multipage folio support) */
+#if defined(LINUX_MULTIPAGE_FOLIO)  /* Though I'm not sure if this is needed */
 static unsigned int
 afs_calculate_optimal_folio_order(struct inode *inode, loff_t offset, size_t len)
 {
+    size_t order;
+    order = ilog2(AFS_CHUNKSIZE(offset) / PAGE_SIZE);  /* CCW check this.. PAGE_SIZE is a constant, but with
+    folios it might be different -- and I think there is probably a better way to do this */
+    return order;
+#if 0
     // For chunk-aligned requests, use full chunk size
     if ((offset & (AFS_CHUNKSIZE - 1)) == 0 && len >= AFS_CHUNKSIZE) {
         return ilog2(AFS_CHUNKSIZE / PAGE_SIZE);
@@ -2408,9 +2422,11 @@ afs_calculate_optimal_folio_order(struct inode *inode, loff_t offset, size_t len
     }
     
     return 0;
+#endif    
 }
 #endif 
 
+#if defined(LINUX_MULTIPAGE_FOLIO)
 /* Populate a page by filling it from the cache file pointed at by cachefp
  * (which contains indicated chunk)
  * If task is NULL, the page copy occurs syncronously, and the routine
@@ -2434,8 +2450,11 @@ afs_linux_read_cache(struct file *cachefp, struct page *page,
     cachemapping = cacheinode->i_mapping;
     newpage = NULL;
     cachepage = NULL;
-
+#if 0
     if (afs_detect_dynamic_folio_support() && page->private > 0) {
+#else
+        if (page->private > 0) {
+#endif
         folio_order = (unsigned int)page->private;
         page->private = 0; // Clear the hint
     }
@@ -2458,7 +2477,8 @@ afs_linux_read_cache(struct file *cachefp, struct page *page,
     cachepage = find_get_page(cachemapping, pageindex);
     if (!cachepage) {
         if (newpage == NULL) {
-#if defined(HAVE_LINUX_FILEMAP_ALLOC_FOLIO)
+/* #if defined(HAVE_LINUX_FILEMAP_ALLOC_FOLIO) */  /* was added in 5.15 -- can just assume it's always available
+                                                      for multipage folios */
             struct folio *folio;
             if (folio_order > 0) {
                 folio = filemap_alloc_folio(mapping_gfp_mask(cachemapping), folio_order);
@@ -2468,9 +2488,11 @@ afs_linux_read_cache(struct file *cachefp, struct page *page,
             if (folio != NULL) {
                 newpage = &folio->page;
             }
+/*	    
 #else
             newpage = page_cache_alloc(cachemapping);
 #endif
+*/
         }
         if (newpage == NULL) {
             code = -ENOMEM;
@@ -2531,6 +2553,109 @@ afs_linux_read_cache(struct file *cachefp, struct page *page,
 
     return code;
 }
+#else /* LINUX_MULTIPAGE_FOLIO */
+/* Populate a page by filling it from the cache file pointed at by cachefp
+ * (which contains indicated chunk)
+ * If task is NULL, the page copy occurs syncronously, and the routine
+ * returns with page still locked. If task is non-NULL, then page copies
+ * may occur in the background, and the page will be unlocked when it is
+ * ready for use. Note that if task is non-NULL and we encounter an error
+ * before we start the background copy, we MUST unlock 'page' before we return.
+ */
+static int
+afs_linux_read_cache(struct file *cachefp, struct page *page,
+		     int chunk, struct afs_lru_pages *alrupages,
+		     struct afs_pagecopy_task *task) {
+    loff_t offset = page_offset(page);
+    struct inode *cacheinode = cachefp->f_dentry->d_inode;
+    struct page *newpage, *cachepage;
+    struct address_space *cachemapping;
+    int pageindex;
+    int code = 0;
+
+    cachemapping = cacheinode->i_mapping;
+    newpage = NULL;
+    cachepage = NULL;
+
+    /* If we're trying to read a page that's past the end of the disk
+     * cache file, then just return a zeroed page */
+    if (AFS_CHUNKOFFSET(offset) >= i_size_read(cacheinode)) {
+	zero_user_segment(page, 0, PAGE_SIZE);
+	SetPageUptodate(page);
+	if (task)
+	    unlock_page(page);
+	return 0;
+    }
+
+    /* From our offset, we now need to work out which page in the disk
+     * file it corresponds to. This will be fun ... */
+    pageindex = (offset - AFS_CHUNKTOBASE(chunk)) >> PAGE_SHIFT;
+
+    while (cachepage == NULL) {
+    cachepage = find_get_page(cachemapping, pageindex);
+    if (!cachepage) {
+        if (newpage == NULL) {
+		newpage = afs_page_cache_alloc(cachemapping);
+        }
+        if (newpage == NULL) {
+            code = -ENOMEM;
+            goto out;
+        }
+
+        code = afs_add_to_page_cache_lru(alrupages, newpage, cachemapping,
+                                         pageindex, GFP_KERNEL);
+        if (code == 0) {
+            cachepage = newpage;
+            newpage = NULL;
+        } else {
+            put_page(newpage);
+            newpage = NULL;
+            if (code != -EEXIST)
+                goto out;
+        }
+    } else {
+        lock_page(cachepage);
+    }
+}
+
+    if (!PageUptodate(cachepage)) {
+	ClearPageError(cachepage);
+	/* Note that mapping_read_page always handles unlocking the given page,
+	 * even when an error is returned. */
+	code = mapping_read_page(cachemapping, cachepage);
+	if (!code && !task) {
+	    wait_on_page_locked(cachepage);
+	}
+    } else {
+        unlock_page(cachepage);
+    }
+
+    if (!code) {
+	if (PageUptodate(cachepage)) {
+	    copy_highpage(page, cachepage);
+	    flush_dcache_page(page);
+	    SetPageUptodate(page);
+
+	    if (task)
+		unlock_page(page);
+        } else if (task) {
+	    afs_pagecopy_queue_page(task, cachepage, page);
+	} else {
+	    code = -EIO;
+	}
+    }
+
+ out:
+    if (code && task) {
+        unlock_page(page);
+    }
+
+    if (cachepage)
+	put_page(cachepage);
+
+    return code;
+}
+#endif /* LINUX_MULTIPAGE_FOLIO */
 
 /*
  * Return true if the file has a mapping that can read pages
@@ -3033,9 +3158,14 @@ afs_linux_can_bypass(struct inode *ip) {
 	    return 1;
 	case LARGE_FILES_BYPASS_CACHE:
     if (i_size_read(ip) > cache_bypass_threshold) {
+/* Don't do this.  This is a user controlled threshold for reading from the cache */
+#if 0	
+#if defined(LINUX_MULTIPAGE_FOLIO)
         if (afs_detect_dynamic_folio_support()) {
             return 0; // Use cache with large folios
         }
+#endif
+#endif	
         return 1;
     }
     AFS_FALLTHROUGH;
@@ -3162,7 +3292,115 @@ get_dcache_readahead(struct dcache **adc, struct file **acacheFp,
     *acacheFp = cacheFp;
     return code;
 }
+#if defined(LINUX_MULTIPAGE_FOLIO)
+/* Do all your changes here */
 
+/*
+ * Readahead reads a number of pages for a particular file. We use
+ * this to optimise the reading, by limiting the number of times upon which
+ * we have to lookup, lock and open vcaches and dcaches.
+ *
+ * Upon return, the vfs layer handles unlocking and putting any pages in the
+ * rac that we did not process here.
+ *
+ * Note: any errors detected during readahead are ignored at this stage by the
+ * vfs. We just need to unlock/put the page and return.  Errors will be detected
+ * later in the vfs processing.
+ */
+static void
+afs_linux_readahead(struct readahead_control *rac)
+{
+    struct page *page;
+    struct address_space *mapping = rac->mapping;
+    struct inode *inode = mapping->host;
+    struct vcache *avc = VTOAFS(inode);
+    struct dcache *tdc;
+    struct file *cacheFp = NULL;
+    int code;
+    loff_t offset;
+    struct afs_lru_pages lrupages;
+    struct afs_pagecopy_task *task;
+#if 0    
+    int use_dynamic_folios = afs_detect_dynamic_folio_support();
+#endif
+    if (afs_linux_bypass_check(inode)) {
+	afs_linux_bypass_readahead(rac);
+	return;
+    }
+    if (cacheDiskType == AFS_FCACHE_TYPE_MEM)
+	return;
+
+    /* No readpage (ex: tmpfs) , skip */
+    if (cachefs_noreadpage)
+	return;
+
+    AFS_GLOCK();
+    code = afs_linux_VerifyVCache(avc, NULL);
+    if (code != 0) {
+	AFS_GUNLOCK();
+	return;
+    }
+
+    ObtainWriteLock(&avc->lock, 912);
+    AFS_GUNLOCK();
+
+    task = afs_pagecopy_init_task();
+
+    tdc = NULL;
+
+    afs_lru_cache_init(&lrupages);
+
+/* CCW ===> Investigate the rac structure.. you might be able to determine the number of pages
+   needed and allocate a folio with that size */
+
+    while ((page = readahead_page(rac)) != NULL) {
+	offset = page_offset(page);
+/* CCW ==> instead of setting page->private -- just pass add a new parameter to afs_linux_read_cache
+  ... and actually -- you might want to think about changing afs_linux_read_cache to take a folio instead of a
+      page .. and if you can determine the size of the file in the cache, you could use that as your folio
+      size */
+    unsigned int optimal_order = afs_calculate_optimal_folio_order(inode, offset, readahead_length(rac));
+    if (optimal_order > 0) {
+    page->private = optimal_order;
+    }
+
+	code = get_dcache_readahead(&tdc, &cacheFp, avc, offset);
+	if (code != 0) {
+	    if (PageLocked(page)) {
+		unlock_page(page);
+	    }
+	    put_page(page);
+	    goto done;
+	}
+
+	if (tdc != NULL) {
+	    /* afs_linux_read_cache will unlock the page */
+	    afs_linux_read_cache(cacheFp, page, tdc->f.chunk, &lrupages, task);
+	} else if (PageLocked(page)) {
+	    unlock_page(page);
+	}
+	put_page(page);
+    }
+
+ done:
+    afs_lru_cache_finalize(&lrupages);
+
+    if (cacheFp != NULL)
+	filp_close(cacheFp, NULL);
+
+    afs_pagecopy_put_task(task);
+
+    AFS_GLOCK();
+    if (tdc != NULL) {
+	ReleaseReadLock(&tdc->lock);
+	afs_PutDCache(tdc);
+    }
+
+    ReleaseWriteLock(&avc->lock);
+    AFS_GUNLOCK();
+    return;
+}
+#else /* LINUX_MULTIPAGE_FOLIO */
 #if defined(STRUCT_ADDRESS_SPACE_OPERATIONS_HAS_READAHEAD)
 /*
  * Readahead reads a number of pages for a particular file. We use
@@ -3189,7 +3427,6 @@ afs_linux_readahead(struct readahead_control *rac)
     loff_t offset;
     struct afs_lru_pages lrupages;
     struct afs_pagecopy_task *task;
-    int use_dynamic_folios = afs_detect_dynamic_folio_support();
 
     if (afs_linux_bypass_check(inode)) {
 	afs_linux_bypass_readahead(rac);
@@ -3220,13 +3457,6 @@ afs_linux_readahead(struct readahead_control *rac)
 
     while ((page = afs_readahead_page(rac)) != NULL) {
 	offset = page_offset(page);
-
-    #if 1 /* again will be replaced with check for a defined name */
-    unsigned int optimal_order = afs_calculate_optimal_folio_order(inode, offset, readahead_length(rac));
-    if (optimal_order > 0) {
-    page->private = optimal_order;
-    }
-    #endif
 
 	code = get_dcache_readahead(&tdc, &cacheFp, avc, offset);
 	if (code != 0) {
@@ -3282,7 +3512,6 @@ afs_linux_readpages(struct file *fp, struct address_space *mapping,
     loff_t offset;
     struct afs_lru_pages lrupages;
     struct afs_pagecopy_task *task;
-    int use_dynamic_folios = afs_detect_dynamic_folio_support();
 
     if (afs_linux_bypass_check(inode))
 	return afs_linux_bypass_readpages(fp, mapping, page_list, num_pages);
@@ -3313,14 +3542,6 @@ afs_linux_readpages(struct file *fp, struct address_space *mapping,
 	struct page *page = list_entry(page_list->prev, struct page, lru);
 	list_del(&page->lru);
 	offset = page_offset(page);
-
-    #if 1 /* again will be replaced with check for a defined name */
-    unsigned int optimal_order = afs_calculate_optimal_folio_order(inode, offset, 
-                                                               num_pages * PAGE_SIZE);
-    if (optimal_order > 0) {
-        page->private = optimal_order;
-    }
-    #endif
 
 	code = get_dcache_readahead(&tdc, &cacheFp, avc, offset);
 	if (code != 0) {
@@ -3355,7 +3576,7 @@ out:
     return 0;
 }
 #endif /* STRUCT_ADDRESS_SPACE_OPERATIONS_HAS_READAHEAD */
-
+#endif /* LINUX_MULTIPAGE_FOLIO */
 /* Prepare an AFS vcache for writeback. Should be called with the vcache
  * locked */
 static inline int
