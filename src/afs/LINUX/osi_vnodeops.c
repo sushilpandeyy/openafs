@@ -48,6 +48,10 @@
 #define MAX_ERRNO 1000L
 #endif
 
+#ifndef AFS_CHUNKSIZE
+#define AFS_CHUNKSIZE (64 * 1024) 
+#endif
+
 #if LINUX_VERSION_CODE < KERNEL_VERSION(2,6,34)
 /* Enable our workaround for a race with d_splice_alias. The race was fixed in
  * 2.6.34, so don't do it after that point. */
@@ -2372,9 +2376,8 @@ afs_detect_dynamic_folio_support(void)
         return 0;
     }
 
-    // Check both kernel support and system capabilities
-    if (afs_detect_large_folio_support() && 
-        (cache_bypass_strategy != ALWAYS_BYPASS_CACHE)) {
+    // Check system capabilities
+    if (cache_bypass_strategy != ALWAYS_BYPASS_CACHE) {
         afs_dynamic_folio_support = 1;
     } else {
         afs_dynamic_folio_support = 0;
@@ -2445,35 +2448,43 @@ afs_linux_read_cache(struct file *cachefp, struct page *page,
     pageindex = (offset - AFS_CHUNKTOBASE(chunk)) >> PAGE_SHIFT;
 
     while (cachepage == NULL) {
-	cachepage = find_get_page(cachemapping, pageindex);
-	if (!cachepage) {
-	    if (newpage == NULL) {
-		if (folio_order > 0) {
-		    newpage = afs_folio_cache_alloc(cachemapping, folio_order);
-		} else {
-		    newpage = afs_page_cache_alloc(cachemapping);
-		}
-	    }
-	    if (newpage == NULL) {
-		code = -ENOMEM;
-		goto out;
-	    }
+    cachepage = find_get_page(cachemapping, pageindex);
+    if (!cachepage) {
+        if (newpage == NULL) {
+#if defined(HAVE_LINUX_FILEMAP_ALLOC_FOLIO)
+            struct folio *folio;
+            if (folio_order > 0) {
+                folio = filemap_alloc_folio(mapping_gfp_mask(cachemapping), folio_order);
+            } else {
+                folio = filemap_alloc_folio(mapping_gfp_mask(cachemapping), 0);
+            }
+            if (folio != NULL) {
+                newpage = &folio->page;
+            }
+#else
+            newpage = page_cache_alloc(cachemapping);
+#endif
+        }
+        if (newpage == NULL) {
+            code = -ENOMEM;
+            goto out;
+        }
 
-	    code = afs_add_to_page_cache_lru(alrupages, newpage, cachemapping,
-					     pageindex, GFP_KERNEL);
-	    if (code == 0) {
-	        cachepage = newpage;
-	        newpage = NULL;
-	    } else {
-		put_page(newpage);
-		newpage = NULL;
-		if (code != -EEXIST)
-		    goto out;
-	    }
+        code = afs_add_to_page_cache_lru(alrupages, newpage, cachemapping,
+                                         pageindex, GFP_KERNEL);
+        if (code == 0) {
+            cachepage = newpage;
+            newpage = NULL;
         } else {
-	    lock_page(cachepage);
-	}
+            put_page(newpage);
+            newpage = NULL;
+            if (code != -EEXIST)
+                goto out;
+        }
+    } else {
+        lock_page(cachepage);
     }
+}
 
     if (!PageUptodate(cachepage)) {
 	ClearPageError(cachepage);
