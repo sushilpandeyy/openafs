@@ -2348,7 +2348,7 @@ mapping_read_page(struct address_space *mapping, struct page *page)
 #endif
 }
 
-#if !defined(LINUX_MULTIPAGE_FOLIO)
+#if !defined(HAVE_LINUX_FOLIO_ADD_LRU) && !defined(HAVE_LINUX_FILEMAP_ALLOC_FOLIO) /* Replaced LINUX_MULTIPAGE_FOLIO */
 /*
  * small compat wrapper for filemap_alloc_folio/page_cache_alloc
  */
@@ -2369,12 +2369,12 @@ afs_page_cache_alloc(struct address_space *cachemapping)
 #endif /* LINUX_MULTIPAGE_FOLIO */
 
 
-#if defined(LINUX_MULTIPAGE_FOLIO)  /* Though I'm not sure if this is needed */
+#if defined(HAVE_LINUX_FOLIO_ADD_LRU) && defined(HAVE_LINUX_FILEMAP_ALLOC_FOLIO)  /* Replaced LINUX_MULTIPAGE_FOLIO */
 static unsigned int
 afs_calculate_optimal_folio_order(struct inode *inode, loff_t offset, size_t len)
 {
     size_t order;
-    order = ilog2(AFS_CHUNKSIZE(offset) / PAGE_SIZE);  /* CCW check this.. PAGE_SIZE is a constant, but with
+    order = ilog2(AFS_CHUNKSIZE / PAGE_SIZE);  /* CCW check this.. PAGE_SIZE is a constant, but with
     folios it might be different -- and I think there is probably a better way to do this */
     return order;
 #if 0
@@ -2393,7 +2393,7 @@ afs_calculate_optimal_folio_order(struct inode *inode, loff_t offset, size_t len
 }
 #endif 
 
-#if defined(LINUX_MULTIPAGE_FOLIO)
+#if defined(HAVE_LINUX_FOLIO_ADD_LRU) && defined(HAVE_LINUX_FILEMAP_ALLOC_FOLIO)  /* Replaced LINUX_MULTIPAGE_FOLIO */
 /* Populate a page by filling it from the cache file pointed at by cachefp
  * (which contains indicated chunk)
  * If task is NULL, the page copy occurs syncronously, and the routine
@@ -2418,7 +2418,7 @@ afs_linux_read_cache(struct file *cachefp, struct page *page,
     newpage = NULL;
     cachepage = NULL;
 #if 0
-    if (afs_detect_dynamic_folio_support() && page->private > 0) {
+    /*Removed segment for multipage folios */
 #else
         if (page->private > 0) {
 #endif
