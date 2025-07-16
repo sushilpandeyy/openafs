@@ -3313,7 +3313,7 @@ afs_linux_readahead(struct readahead_control *rac)
 /* CCW ===> Investigate the rac structure.. you might be able to determine the number of pages
    needed and allocate a folio with that size */
 
-    while ((page = readahead_page(rac)) != NULL) {
+    while ((page = afs_readahead_page(rac)) != NULL) {
 	offset = page_offset(page);
 /* CCW ==> instead of setting page->private -- just pass add a new parameter to afs_linux_read_cache
   ... and actually -- you might want to think about changing afs_linux_read_cache to take a folio instead of a
@@ -3326,20 +3326,20 @@ afs_linux_readahead(struct readahead_control *rac)
 
 	code = get_dcache_readahead(&tdc, &cacheFp, avc, offset);
 	if (code != 0) {
-	    if (PageLocked(page)) {
-		unlock_page(page);
+	    if (afs_PageLocked(page)) {
+		afs_unlock_page(page);
 	    }
-	    put_page(page);
+	    afs_put_page(page);
 	    goto done;
 	}
 
 	if (tdc != NULL) {
 	    /* afs_linux_read_cache will unlock the page */
 	    afs_linux_read_cache(cacheFp, page, tdc->f.chunk, &lrupages, task);
-	} else if (PageLocked(page)) {
-	    unlock_page(page);
+	} else if (afs_PageLocked(page)) {
+	    afs_unlock_page(page);
 	}
-	put_page(page);
+	afs_put_page(page);
     }
 
  done:
