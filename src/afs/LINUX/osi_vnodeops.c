@@ -3267,7 +3267,9 @@ get_dcache_readahead(struct dcache **adc, struct file **acacheFp,
  * vfs. We just need to unlock/put the page and return.  Errors will be detected
  * later in the vfs processing.
  */
-static void
+void
+afs_linux_readahead(struct readahead_control *rac);
+void
 afs_linux_readahead(struct readahead_control *rac)
 {
     struct page *page;
