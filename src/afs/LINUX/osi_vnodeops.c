@@ -2374,8 +2374,7 @@ static unsigned int
 afs_calculate_optimal_folio_order(struct inode *inode, loff_t offset, size_t len)
 {
     size_t order;
-    order = ilog2((64 * 1024) / PAGE_SIZE);  /* CCW check this.. PAGE_SIZE is a constant, but with
-    folios it might be different -- and I think there is probably a better way to do this */
+    order = ilog2(AFS_CHUNKSIZE / PAGE_SIZE);  /* Use AFS_CHUNKSIZE instead of hardcoded 64 * 1024 */
     return order;
 #if 0
     // For chunk-aligned requests, use full chunk size
