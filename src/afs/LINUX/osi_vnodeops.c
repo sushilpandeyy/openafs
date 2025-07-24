@@ -2373,22 +2373,31 @@ afs_page_cache_alloc(struct address_space *cachemapping)
 static unsigned int
 afs_calculate_optimal_folio_order(struct inode *inode, loff_t offset, size_t len)
 {
-    size_t order;
-    order = ilog2(AFS_CHUNKSIZE / PAGE_SIZE);  /* Use AFS_CHUNKSIZE instead of hardcoded 64 * 1024 */
+    unsigned int order;
+    size_t chunk_offset, remaining_in_chunk;
+    
+    /* Calculate position within chunk */
+    chunk_offset = offset & (AFS_CHUNKSIZE - 1);
+    remaining_in_chunk = AFS_CHUNKSIZE - chunk_offset;
+    
+    /* For chunk-aligned requests, use full chunk size */
+    if (chunk_offset == 0 && len >= AFS_CHUNKSIZE) {
+        order = ilog2(AFS_CHUNKSIZE / PAGE_SIZE);
+    }
+    /* For smaller requests, use appropriate order */
+    else if (len >= (PAGE_SIZE * 4) && len <= remaining_in_chunk) {
+        order = 2; /* 4 pages */
+    }
+    /* Default to single page */
+    else {
+        order = 0;
+    }
+    
+    /* Ensure we don't exceed reasonable limits */
+    if (order > 9) /* Max 512 pages */
+        order = 9;
+    
     return order;
-#if 0
-    // For chunk-aligned requests, use full chunk size
-    if ((offset & (AFS_CHUNKSIZE - 1)) == 0 && len >= AFS_CHUNKSIZE) {
-        return ilog2(AFS_CHUNKSIZE / PAGE_SIZE);
-    }
-    
-    // For smaller requests, use appropriate order
-    if (len >= (PAGE_SIZE * 4)) {
-        return 2; // 4 pages
-    }
-    
-    return 0;
-#endif    
 }
 #endif 
 
@@ -3266,6 +3275,134 @@ get_dcache_readahead(struct dcache **adc, struct file **acacheFp,
  * vfs. We just need to unlock/put the page and return.  Errors will be detected
  * later in the vfs processing.
  */
+
+struct afs_folio_read_info {
+    struct folio *folio;                
+    unsigned int page_idx;               
+    unsigned int folio_nr_pages;        
+    unsigned int optimal_order;          
+    bool chunk_aligned;                 
+    size_t remaining_in_chunk;          
+};
+
+static int
+afs_linux_read_cache_folio(struct file *cachefp, struct page *page,
+                           int chunk, struct afs_lru_pages *alrupages,
+                           struct afs_pagecopy_task *task,
+                           struct afs_folio_read_info *folio_info)
+{
+    loff_t offset = page_offset(page);
+    struct inode *cacheinode = cachefp->f_dentry->d_inode;
+    struct page *newpage = NULL, *cachepage = NULL;
+    struct address_space *cachemapping;
+    int pageindex;
+    int code = 0;
+    unsigned int folio_order = 0;
+    
+    cachemapping = cacheinode->i_mapping;
+    
+    /* Use folio order hint if available */
+    if (folio_info && folio_info->optimal_order > 0) {
+        folio_order = folio_info->optimal_order;
+    }
+    
+    /* Check if we're past end of cache file */
+    if (AFS_CHUNKOFFSET(offset) >= i_size_read(cacheinode)) {
+        zero_user_segment(page, 0, PAGE_SIZE);
+        SetPageUptodate(page);
+        if (task)
+            unlock_page(page);
+        return 0;
+    }
+    
+    /* Calculate page index in cache file */
+    pageindex = (offset - AFS_CHUNKTOBASE(chunk)) >> PAGE_SHIFT;
+    
+    /* Try to find existing cache page/folio */
+    while (cachepage == NULL) {
+        cachepage = find_get_page(cachemapping, pageindex);
+        if (!cachepage) {
+            if (newpage == NULL) {
+                /* Allocate folio if order > 0, otherwise single page */
+                if (folio_order > 0) {
+                    struct folio *folio = filemap_alloc_folio(
+                        mapping_gfp_mask(cachemapping), folio_order);
+                    if (folio) {
+                        newpage = folio_page(folio, 0);
+                    }
+                }
+                
+                /* Fallback to single page allocation */
+                if (!newpage) {
+                    struct folio *folio = filemap_alloc_folio(
+                        mapping_gfp_mask(cachemapping), 0);
+                    if (folio) {
+                        newpage = folio_page(folio, 0);
+                    }
+                }
+            }
+            
+            if (newpage == NULL) {
+                code = -ENOMEM;
+                goto out;
+            }
+            
+            code = afs_add_to_page_cache_lru(alrupages, newpage, cachemapping,
+                                           pageindex, GFP_KERNEL);
+            if (code == 0) {
+                cachepage = newpage;
+                newpage = NULL;
+            } else {
+                put_page(newpage);
+                newpage = NULL;
+                if (code != -EEXIST)
+                    goto out;
+            }
+        } else {
+            lock_page(cachepage);
+        }
+    }
+    
+    /* Standard cache read */
+    if (!PageUptodate(cachepage)) {
+        ClearPageError(cachepage);
+        code = mapping_read_page(cachemapping, cachepage);
+        if (!code && !task) {
+            afs_page_wait_locked(cachepage);
+        }
+    } else {
+        unlock_page(cachepage);
+    }
+    
+    if (!code) {
+        if (PageUptodate(cachepage)) {
+            copy_highpage(page, cachepage);
+            flush_dcache_page(page);
+            SetPageUptodate(page);
+            
+            if (task)
+                unlock_page(page);
+        } else if (task) {
+            afs_pagecopy_queue_page(task, cachepage, page);
+        } else {
+            code = -EIO;
+        }
+    }
+
+out:
+    if (code && task) {
+        unlock_page(page);
+    }
+    
+    if (cachepage)
+        put_page(cachepage);
+        
+    if (newpage)
+        put_page(newpage);
+    
+    return code;
+}
+
 void
 afs_linux_readahead(struct readahead_control *rac);
 void
