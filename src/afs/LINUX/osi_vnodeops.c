@@ -3261,129 +3261,96 @@ get_dcache_readahead(struct dcache **adc, struct file **acacheFp,
     return code;
 }
 #if defined(LINUX_MULTIPAGE_FOLIO)
-/* Do all your changes here */
-
 /*
- * Readahead reads a number of pages for a particular file. We use
- * this to optimise the reading, by limiting the number of times upon which
- * we have to lookup, lock and open vcaches and dcaches.
- *
- * Upon return, the vfs layer handles unlocking and putting any pages in the
- * rac that we did not process here.
- *
- * Note: any errors detected during readahead are ignored at this stage by the
- * vfs. We just need to unlock/put the page and return.  Errors will be detected
- * later in the vfs processing.
+ * Readahead reads folios for a particular file. We use this to optimize
+ * reading by limiting dcache lookups and file operations.
  */
 
-struct afs_folio_read_info {
-    struct folio *folio;                
-    unsigned int page_idx;               
-    unsigned int folio_nr_pages;        
-    unsigned int optimal_order;          
-    bool chunk_aligned;                 
-    size_t remaining_in_chunk;          
-};
-
 static int
-afs_linux_read_cache_folio(struct file *cachefp, struct page *page,
+afs_linux_read_cache_folio(struct file *cachefp, struct folio *folio,
                            int chunk, struct afs_lru_pages *alrupages,
-                           struct afs_pagecopy_task *task,
-                           struct afs_folio_read_info *folio_info)
+                           struct afs_pagecopy_task *task)
 {
-    loff_t offset = page_offset(page);
+    loff_t offset = folio_pos(folio);
     struct inode *cacheinode = cachefp->f_dentry->d_inode;
-    struct page *newpage = NULL, *cachepage = NULL;
+    struct folio *newfolio = NULL, *cachefolio = NULL;
     struct address_space *cachemapping;
-    int pageindex;
+    pgoff_t index;
     int code = 0;
-    unsigned int folio_order = 0;
     
     cachemapping = cacheinode->i_mapping;
     
-    /* Use folio order hint if available */
-    if (folio_info && folio_info->optimal_order > 0) {
-        folio_order = folio_info->optimal_order;
-    }
-    
     /* Check if we're past end of cache file */
     if (AFS_CHUNKOFFSET(offset) >= i_size_read(cacheinode)) {
-        zero_user_segment(page, 0, PAGE_SIZE);
-        SetPageUptodate(page);
+        folio_zero_range(folio, 0, folio_size(folio));
+        folio_mark_uptodate(folio);
         if (task)
-            unlock_page(page);
+            folio_unlock(folio);
         return 0;
     }
     
-    /* Calculate page index in cache file */
-    pageindex = (offset - AFS_CHUNKTOBASE(chunk)) >> PAGE_SHIFT;
+    /* Calculate folio index in cache file */
+    index = (offset - AFS_CHUNKTOBASE(chunk)) >> PAGE_SHIFT;
     
-    /* Try to find existing cache page/folio */
-    while (cachepage == NULL) {
-        cachepage = find_get_page(cachemapping, pageindex);
-        if (!cachepage) {
-            if (newpage == NULL) {
-                /* Allocate folio if order > 0, otherwise single page */
-                if (folio_order > 0) {
-                    struct folio *folio = filemap_alloc_folio(
-                        mapping_gfp_mask(cachemapping), folio_order);
-                    if (folio) {
-                        newpage = folio_page(folio, 0);
-                    }
-                }
-                
-                /* Fallback to single page allocation */
-                if (!newpage) {
-                    struct folio *folio = filemap_alloc_folio(
-                        mapping_gfp_mask(cachemapping), 0);
-                    if (folio) {
-                        newpage = folio_page(folio, 0);
-                    }
+    /* Try to find existing cache folio */
+    while (cachefolio == NULL) {
+        cachefolio = filemap_get_folio(cachemapping, index);
+        if (IS_ERR(cachefolio)) {
+            cachefolio = NULL;
+            if (newfolio == NULL) {
+                newfolio = filemap_alloc_folio(mapping_gfp_mask(cachemapping), 
+                                             folio_order(folio));
+                if (!newfolio) {
+                    /* Fallback to single page folio */
+                    newfolio = filemap_alloc_folio(mapping_gfp_mask(cachemapping), 0);
                 }
             }
             
-            if (newpage == NULL) {
+            if (!newfolio) {
                 code = -ENOMEM;
                 goto out;
             }
             
-            code = afs_add_to_page_cache_lru(alrupages, newpage, cachemapping,
-                                           pageindex, GFP_KERNEL);
+            code = filemap_add_folio(cachemapping, newfolio, index, GFP_KERNEL);
             if (code == 0) {
-                cachepage = newpage;
-                newpage = NULL;
+                cachefolio = newfolio;
+                newfolio = NULL;
+                /* Add to LRU */
+                folio_add_lru(cachefolio);
             } else {
-                put_page(newpage);
-                newpage = NULL;
+                folio_put(newfolio);
+                newfolio = NULL;
                 if (code != -EEXIST)
                     goto out;
             }
         } else {
-            lock_page(cachepage);
+            folio_lock(cachefolio);
         }
     }
     
-    /* Standard cache read */
-    if (!PageUptodate(cachepage)) {
-        ClearPageError(cachepage);
-        code = mapping_read_page(cachemapping, cachepage);
+    /* Read cache folio if needed */
+    if (!folio_test_uptodate(cachefolio)) {
+        folio_clear_error(cachefolio);
+        code = filemap_read_folio(NULL, cachefolio);
         if (!code && !task) {
-            afs_page_wait_locked(cachepage);
+            folio_wait_locked(cachefolio);
         }
     } else {
-        unlock_page(cachepage);
+        folio_unlock(cachefolio);
     }
     
     if (!code) {
-        if (PageUptodate(cachepage)) {
-            copy_highpage(page, cachepage);
-            flush_dcache_page(page);
-            SetPageUptodate(page);
+        if (folio_test_uptodate(cachefolio)) {
+            folio_copy(folio, cachefolio);
+            folio_mark_uptodate(folio);
             
             if (task)
-                unlock_page(page);
+                folio_unlock(folio);
         } else if (task) {
-            afs_pagecopy_queue_page(task, cachepage, page);
+            /* Queue for background copy - convert to pages for existing API */
+            struct page *src_page = folio_page(cachefolio, 0);
+            struct page *dst_page = folio_page(folio, 0);
+            afs_pagecopy_queue_page(task, src_page, dst_page);
         } else {
             code = -EIO;
         }
@@ -3391,37 +3358,31 @@ afs_linux_read_cache_folio(struct file *cachefp, struct page *page,
 
 out:
     if (code && task) {
-        unlock_page(page);
+        folio_unlock(folio);
     }
     
-    if (cachepage)
-        put_page(cachepage);
+    if (cachefolio)
+        folio_put(cachefolio);
         
-    if (newpage)
-        put_page(newpage);
+    if (newfolio)
+        folio_put(newfolio);
     
     return code;
 }
 
-void
-afs_linux_readahead(struct readahead_control *rac);
-void
+static void
 afs_linux_readahead(struct readahead_control *rac)
 {
     struct folio *folio;
-    struct page *page;
     struct address_space *mapping = rac->mapping;
     struct inode *inode = mapping->host;
     struct vcache *avc = VTOAFS(inode);
-    struct dcache *tdc;
+    struct dcache *tdc = NULL;
     struct file *cacheFp = NULL;
     int code;
-    loff_t offset, total_length, current_chunk_start = -1;
+    loff_t offset, current_chunk_start = -1;
     struct afs_lru_pages lrupages;
     struct afs_pagecopy_task *task;
-    unsigned int optimal_order;
-    size_t batch_size, processed_pages = 0;
-    bool chunk_boundary_crossed = false;
     
     if (afs_linux_bypass_check(inode)) {
         afs_linux_bypass_readahead(rac);
@@ -3431,7 +3392,7 @@ afs_linux_readahead(struct readahead_control *rac)
     if (cacheDiskType == AFS_FCACHE_TYPE_MEM)
         return;
 
-    /* No readpage (ex: tmpfs), skip */
+    /* No readpage support, skip */
     if (cachefs_noreadpage)
         return;
 
@@ -3446,117 +3407,60 @@ afs_linux_readahead(struct readahead_control *rac)
     AFS_GUNLOCK();
 
     task = afs_pagecopy_init_task();
-    tdc = NULL;
     afs_lru_cache_init(&lrupages);
 
-    /* Calculate optimal folio order based on readahead characteristics */
-    total_length = readahead_length(rac);
-    optimal_order = afs_calculate_optimal_folio_order(inode, readahead_pos(rac), total_length);
-    batch_size = (1 << optimal_order);
-
     /*
-     * Multi-folio optimization strategy:
-     * 1. Group pages by AFS chunk boundaries
-     * 2. Allocate larger folios when beneficial
-     * 3. Batch I/O operations within chunk boundaries
-     * 4. Minimize dcache lookups and file handle operations
+     * Process folios from readahead control
      */
-    while ((folio = __readahead_folio(rac)) != NULL) {
-        unsigned int folio_nr_pages = folio_nr_pages(folio);
-        unsigned int page_idx;
+    while ((folio = readahead_folio(rac)) != NULL) {
+        offset = folio_pos(folio);
         
-        /* Process each page within the folio */
-        for (page_idx = 0; page_idx < folio_nr_pages; page_idx++) {
-            page = folio_page(folio, page_idx);
-            offset = page_offset(page);
+        /* Check for chunk boundary crossing */
+        loff_t chunk_start = AFS_CHUNKTOBASE(AFS_CHUNK(offset));
+        if (current_chunk_start != chunk_start) {
+            current_chunk_start = chunk_start;
             
-            /* Check for chunk boundary crossing optimization */
-            loff_t chunk_start = AFS_CHUNKTOBASE(AFS_CHUNK(offset));
-            if (current_chunk_start != chunk_start) {
-                chunk_boundary_crossed = true;
-                current_chunk_start = chunk_start;
-                
-                /* Release previous dcache if we crossed chunk boundary */
-                if (tdc != NULL && chunk_boundary_crossed && processed_pages > 0) {
-                    if (cacheFp != NULL) {
-                        filp_close(cacheFp, NULL);
-                        cacheFp = NULL;
-                    }
-                    
-                    AFS_GLOCK();
-                    ReleaseReadLock(&tdc->lock);
-                    afs_PutDCache(tdc);
-                    AFS_GUNLOCK();
-                    tdc = NULL;
-                }
-            }
-
-            /* Get dcache for current chunk */
-            code = get_dcache_readahead(&tdc, &cacheFp, avc, offset);
-            if (code != 0) {
-                /* Handle error: unlock all remaining pages in folio */
-                for (unsigned int cleanup_idx = page_idx; cleanup_idx < folio_nr_pages; cleanup_idx++) {
-                    struct page *cleanup_page = folio_page(folio, cleanup_idx);
-                    if (afs_PageLocked(cleanup_page)) {
-                        afs_unlock_page(cleanup_page);
-                    }
-                }
-                folio_put(folio);
-                goto done;
-            }
-
+            /* Release previous dcache if we crossed chunk boundary */
             if (tdc != NULL) {
-                /*
-                 * Multi-folio enhancement: pass folio information to read_cache
-                 * This allows the lower layer to optimize I/O for contiguous pages
-                 */
-                struct afs_folio_read_info folio_info = {
-                    .folio = folio,
-                    .page_idx = page_idx,
-                    .folio_nr_pages = folio_nr_pages,
-                    .optimal_order = optimal_order,
-                    .chunk_aligned = (offset & (AFS_CHUNKSIZE - 1)) == 0,
-                    .remaining_in_chunk = AFS_CHUNKSIZE - (offset & (AFS_CHUNKSIZE - 1))
-                };
-                
-                /* Enhanced read_cache call with folio context */
-                afs_linux_read_cache_folio(cacheFp, page, tdc->f.chunk, 
-                                         &lrupages, task, &folio_info);
-            } else if (afs_PageLocked(page)) {
-                afs_unlock_page(page);
-            }
-            
-            processed_pages++;
-            
-            /*
-             * Batch processing optimization: if we've processed a full batch
-             * and are still within the same chunk, continue with the same dcache
-             */
-            if (processed_pages % batch_size == 0 && 
-                (page_idx + 1 < folio_nr_pages || readahead_count(rac) > 0)) {
-                /* Yield CPU periodically for large readaheads */
-                if (processed_pages % (batch_size * 4) == 0) {
-                    cond_resched();
+                if (cacheFp != NULL) {
+                    filp_close(cacheFp, NULL);
+                    cacheFp = NULL;
                 }
+                
+                AFS_GLOCK();
+                ReleaseReadLock(&tdc->lock);
+                afs_PutDCache(tdc);
+                AFS_GUNLOCK();
+                tdc = NULL;
             }
         }
+
+        /* Get dcache for current chunk */
+        code = get_dcache_readahead(&tdc, &cacheFp, avc, offset);
+        if (code != 0) {
+            if (folio_test_locked(folio)) {
+                folio_unlock(folio);
+            }
+            folio_put(folio);
+            goto done;
+        }
+
+        if (tdc != NULL) {
+            /* Process folio through cache */
+            afs_linux_read_cache_folio(cacheFp, folio, tdc->f.chunk, 
+                                     &lrupages, task);
+        } else if (folio_test_locked(folio)) {
+            folio_unlock(folio);
+        }
         
-        /* Put the folio after processing all its pages */
         folio_put(folio);
-        chunk_boundary_crossed = false;
     }
 
 done:
-    /* Enhanced cleanup with batch operation statistics */
     afs_lru_cache_finalize(&lrupages);
 
     if (cacheFp != NULL)
         filp_close(cacheFp, NULL);
-
-    /* Log performance metrics for tuning */
-    if (processed_pages > 0) {
-        afs_update_readahead_stats(avc, processed_pages, optimal_order, total_length);
-    }
 
     afs_pagecopy_put_task(task);
 
